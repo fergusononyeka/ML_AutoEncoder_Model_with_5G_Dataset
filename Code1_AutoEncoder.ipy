@@ -1,0 +1,271 @@
+"""Autoencoder for Anomaly Detection in 5G KPI Dataset
+This notebook demonstrates how to build, train, and evaluate an Autoencoder model for anomaly detection using the provided 5G KPI dataset. An Autoencoder is a type of neural network used for unsupervised learning of efficient data codings. The aim of an Autoencoder is to learn a representation (encoding) for a set of data, typically for dimensionality reduction, by training the network to ignore signal 'noise'.
+
+For anomaly detection, an Autoencoder is trained on 'normal' data, learning to reconstruct it accurately. When presented with anomalous data, it struggles to reconstruct it, resulting in a high reconstruction error. This error can then be used to identify anomalies."""
+
+
+"""1. Import Necessary Libraries
+We'll start by importing all the required libraries for data manipulation, model building, and visualization."""
+
+import pandas as pd
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, Dense
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_squared_error, precision_recall_fscore_support, confusion_matrix, roc_curve, auc
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Ensure reproducibility
+tf.random.set_seed(42)
+np.random.seed(42)
+
+print("Libraries imported successfully.")
+
+"""2. Load the Dataset
+
+Load the 5G KPI dataset from the specified CSV file. We'll inspect the first few rows and general information about the dataset."""
+
+try:
+    df = pd.read_csv('/content/ds1_processed.csv')
+    print("Dataset loaded successfully.")
+    display(df.head())
+    print("\nDataset Info:")
+    df.info()
+except FileNotFoundError:
+    print("Error: '/content/ds1_processed.csv' not found. Please ensure the file is uploaded or the path is correct.")
+    df = None
+
+
+"""3. Data Preprocessing
+For Autoencoders, it's crucial to scale the input data. We'll use MinMaxScaler to scale the numerical features between 0 and 1. We assume the dataset contains numerical KPI features suitable for anomaly detection. If there's a 'label' column indicating anomalies, we'll separate it for evaluation later."""
+
+if df is not None:
+    # Assuming the last column is the 'anomaly' label if present, otherwise assume no labels initially.
+    # For this example, let's assume we train on all numerical columns and look for anomalies.
+    # If there's a 'label' column, separate it for later evaluation.
+    
+    # Identify numerical columns for scaling
+    numerical_cols = df.select_dtypes(include=np.number).columns.tolist()
+    
+    # Check for a 'label' or 'anomaly' column to exclude from training and use for evaluation
+    if 'label' in numerical_cols: # Common for anomaly detection datasets
+        labels = df['label']
+        numerical_cols.remove('label')
+        print(" 'label' column detected and separated for evaluation.")
+    elif 'anomaly' in numerical_cols:
+        labels = df['anomaly']
+        numerical_cols.remove('anomaly')
+        print(" 'anomaly' column detected and separated for evaluation.")
+    else:
+        labels = pd.Series([0] * len(df)) # Create dummy labels if none exist for example purposes
+        print("No explicit 'label' or 'anomaly' column found. Assuming all data is 'normal' for training, but will use dummy labels for evaluation metrics.")
+
+    data = df[numerical_cols]
+
+    # Initialize and fit the MinMaxScaler
+    scaler = MinMaxScaler()
+    scaled_data = scaler.fit_transform(data)
+
+    # Convert back to DataFrame for better readability if needed, but numpy array is fine for TF
+    X_train = pd.DataFrame(scaled_data, columns=numerical_cols)
+    
+    print("\nScaled Data Head:")
+    display(X_train.head())
+    print(f"\nShape of processed data: {X_train.shape}")
+else:
+    X_train = None
+    labels = None
+
+
+"""4. Autoencoder Model Definition
+An Autoencoder consists of an encoder that compresses the input into a lower-dimensional latent space representation, and a decoder that reconstructs the input from this representation. We will define a simple Autoencoder with Dense layers.
+
+Encoder: Compresses the input data.
+Decoder: Reconstructs the original input from the compressed representation.
+The model will be compiled with the Adam optimizer and Mean Squared Error (MSE) as the loss function, as Autoencoders aim to minimize the reconstruction error."""
+
+if X_train is not None:
+    input_dim = X_train.shape[1]
+    encoding_dim = int(input_dim / 2) # Latent dimension
+
+    # Encoder
+    input_layer = Input(shape=(input_dim,))
+    encoder = Dense(encoding_dim, activation="relu")(input_layer)
+    
+    # Decoder
+    decoder = Dense(input_dim, activation="sigmoid")(encoder) # Sigmoid for output in [0,1] range
+
+    # Autoencoder Model
+    autoencoder = Model(inputs=input_layer, outputs=decoder)
+    autoencoder.compile(optimizer='adam', loss='mse')
+
+    print("Autoencoder model defined:")
+    autoencoder.summary()
+else:
+    print("Cannot define model: X_train is not available.")
+    autoencoder = None
+
+"""5. Model Training
+We will train the Autoencoder on the X_train data. The goal is for the model to learn to reconstruct the 'normal' patterns in the data. The fit method returns a History object which we can use to plot the training loss."""
+
+if autoencoder is not None and X_train is not None:
+    # Train the autoencoder
+    history = autoencoder.fit(X_train, X_train, 
+                              epochs=50, 
+                              batch_size=32, 
+                              shuffle=True, 
+                              validation_split=0.2, # Use a validation split to monitor generalization
+                              verbose=0)
+
+    print("Model training complete.")
+
+    # Plot training and validation loss
+    plt.figure(figsize=(10, 6))
+    plt.plot(history.history['loss'], label='Training Loss')
+    plt.plot(history.history['val_loss'], label='Validation Loss')
+    plt.title('Autoencoder Model Loss During Training')
+    plt.xlabel('Epoch')
+    plt.ylabel('Mean Squared Error (MSE)')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+else:
+    print("Cannot train model: Autoencoder or X_train is not available.")
+
+"""6. Anomaly Detection and Evaluation Metrics
+After training, we will use the Autoencoder to reconstruct the X_train data. The reconstruction error (MSE between original and reconstructed data) is a key indicator for anomaly detection. Anomalies will have significantly higher reconstruction errors.
+
+We will calculate:
+
+Reconstruction Error (MSE) for each data point.
+Anomaly Threshold: Typically determined by analyzing the distribution of reconstruction errors on the training data (e.g., using a high percentile or standard deviation). For this example, we'll use a percentile.
+Precision, Recall, F1-Score: These metrics will be calculated if a ground truth 'label' column was available, to evaluate the anomaly detection performance."""
+
+if autoencoder is not None and X_train is not None and labels is not None:
+    # Get reconstruction errors
+    reconstructions = autoencoder.predict(X_train)
+    mse = np.mean(np.power(X_train - reconstructions, 2), axis=1)
+
+    # Plot reconstruction error distribution
+    plt.figure(figsize=(10, 6))
+    sns.histplot(mse, bins=50, kde=True)
+    plt.title('Distribution of Reconstruction Errors (MSE)')
+    plt.xlabel('Reconstruction Error (MSE)')
+    plt.ylabel('Frequency')
+    plt.grid(True)
+    plt.show()
+
+    # Determine anomaly threshold (e.g., 95th percentile of MSE for non-anomalous data)
+    # If you have labeled data, it's better to find a threshold that optimizes F1-score.
+    # For unlabeled data, a percentile or standard deviation based approach is common.
+    threshold = np.percentile(mse, 95) # Using 95th percentile as an example
+    print(f"Calculated Anomaly Threshold (95th percentile): {threshold:.4f}")
+
+    # Identify anomalies based on the threshold
+    anomalies = mse > threshold
+
+    # Add MSE and anomaly predictions to the original DataFrame (or a copy)
+    df_results = df.copy() # Use a copy to avoid modifying original df directly if it's reused
+    df_results['reconstruction_error'] = mse
+    df_results['is_anomaly_predicted'] = anomalies.astype(int)
+
+    print("\nFirst 5 rows with Reconstruction Error and Anomaly Prediction:")
+    display(df_results[['reconstruction_error', 'is_anomaly_predicted', 'label']].head() if 'label' in df_results.columns else df_results[['reconstruction_error', 'is_anomaly_predicted']].head())
+    
+    # Evaluate performance if ground truth labels are available
+    if 'label' in df_results.columns: # Assuming 'label' is the true anomaly column
+        true_anomalies = df_results['label'].astype(bool)
+        
+        # Calculate Precision, Recall, F1-Score
+        precision, recall, f1_score, _ = precision_recall_fscore_support(true_anomalies, anomalies, average='binary', pos_label=1)
+        
+        print(f"\nEvaluation Metrics:")
+        print(f"Precision: {precision:.4f}")
+        print(f"Recall: {recall:.4f}")
+        print(f"F1-Score: {f1_score:.4f}")
+
+        # Confusion Matrix
+        cm = confusion_matrix(true_anomalies, anomalies)
+        print("\nConfusion Matrix:")
+        display(pd.DataFrame(cm, index=['Actual Normal', 'Actual Anomaly'], columns=['Predicted Normal', 'Predicted Anomaly']))
+
+        # ROC Curve
+        fpr, tpr, thresholds = roc_curve(true_anomalies, mse)
+        roc_auc = auc(fpr, tpr)
+
+        plt.figure(figsize=(8, 6))
+        plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (area = {roc_auc:.2f})')
+        plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+        plt.xlim([0.0, 1.0])
+        plt.ylim([0.0, 1.05])
+        plt.xlabel('False Positive Rate')
+        plt.ylabel('True Positive Rate')
+        plt.title('Receiver Operating Characteristic (ROC) Curve')
+        plt.legend(loc="lower right")
+        plt.grid(True)
+        plt.show()
+
+    else:
+        print("\nNo ground truth 'label' column found for comprehensive evaluation metrics (Precision, Recall, F1-Score, Confusion Matrix, ROC Curve).")
+        print(f"Number of predicted anomalies: {anomalies.sum()} out of {len(df_results)} data points.")
+else:
+    print("Cannot perform anomaly detection: Autoencoder, X_train, or labels not available.")
+
+"""7. Graphical Comparison for Model Key Parameters
+Since an Autoencoder's primary 'key parameter' for anomaly detection is the reconstruction error, we can visualize the data points in relation to their error and the determined threshold. This helps in understanding which data points are considered anomalous.
+
+We can also plot the reconstruction errors against the original values of a specific KPI to see the spread."""
+
+if X_train is not None and 'reconstruction_error' in df_results.columns:
+    # Select a feature to plot against reconstruction error (e.g., the first numerical column)
+    feature_to_plot = numerical_cols[0] if numerical_cols else None
+
+    if feature_to_plot:
+        plt.figure(figsize=(12, 7))
+        sns.scatterplot(x=df[feature_to_plot], y=df_results['reconstruction_error'], hue=df_results['is_anomaly_predicted'], style=df_results['is_anomaly_predicted'], palette='viridis', alpha=0.7)
+        plt.axhline(y=threshold, color='r', linestyle='--', label=f'Anomaly Threshold ({threshold:.4f})')
+        plt.title(f'Reconstruction Error vs. {feature_to_plot} (Anomalies Highlighted)')
+        plt.xlabel(f'Original {feature_to_plot}')
+        plt.ylabel('Reconstruction Error (MSE)')
+        plt.legend(title='Is Anomaly Predicted', loc='upper right')
+        plt.grid(True)
+        plt.show()
+
+    # Visualize anomalies across all features (if more than 2 features, use dimensionality reduction or pair plots for samples)
+    # For simplicity, let's plot a scatter matrix of original data and highlight anomalies if few features
+    if len(numerical_cols) <= 4 and numerical_cols:
+        print("\nPair Plot of Features, highlighting Anomalies:")
+        sns.pairplot(df_results, vars=numerical_cols, hue='is_anomaly_predicted', palette='coolwarm', diag_kind='kde')
+        plt.suptitle('Pair Plot of Features with Predicted Anomalies', y=1.02) # Adjust suptitle position
+        plt.show()
+    elif numerical_cols:
+        print(f"\nToo many features ({len(numerical_cols)}) for a pair plot. Consider plotting specific features or using dimensionality reduction for visualization.")
+        
+    # Example: Plotting a specific anomaly for visual inspection
+    anomalous_data_points = df_results[df_results['is_anomaly_predicted'] == 1]
+    if not anomalous_data_points.empty:
+        print("\nExample of an anomalous data point (first detected anomaly):")
+        display(anomalous_data_points.iloc[0][numerical_cols])
+        
+        # Plot original vs reconstructed for one anomalous point
+        anomaly_index = anomalous_data_points.index[0]
+        original_anomaly = X_train.iloc[anomaly_index].values
+        reconstructed_anomaly = autoencoder.predict(np.array([original_anomaly]))[0]
+
+        plt.figure(figsize=(10, 6))
+        plt.plot(original_anomaly, label='Original Anomaly')
+        plt.plot(reconstructed_anomaly, label='Reconstructed Anomaly', linestyle='--')
+        plt.title(f'Original vs. Reconstructed for Anomaly at Index {anomaly_index}')
+        plt.xlabel('Feature Index')
+        plt.ylabel('Scaled Value')
+        plt.legend()
+        plt.grid(True)
+        plt.show()
+    else:
+        print("No anomalies detected to display specific examples.")
+else:
+    print("Cannot generate graphical comparisons: Data or results not available.")
+
+
